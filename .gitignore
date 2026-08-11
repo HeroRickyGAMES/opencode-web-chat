@@ -1,0 +1,11 @@
+# Compilado
+/chat-server
+
+# Segredos (nunca subir)
+.env
+.env.*
+*.pem
+*.key
+
+# Logs / temporários
+*.log

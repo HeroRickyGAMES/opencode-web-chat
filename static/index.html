@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Big Pickle Chat</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;background:#0f0f13;color:#e4e4e7;height:100vh;display:flex;flex-direction:column}
+header{background:#1a1a24;padding:14px 24px;border-bottom:1px solid #2a2a3a;display:flex;align-items:center;gap:12px;flex-shrink:0}
+header h1{font-size:18px;font-weight:600;color:#fff}
+header span{font-size:12px;color:#888;background:#2a2a3a;padding:2px 10px;border-radius:99px}
+#chat{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px;scroll-behavior:smooth}
+#chat::-webkit-scrollbar{width:6px}
+#chat::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
+.msg{max-width:80%;padding:12px 16px;border-radius:14px;line-height:1.5;font-size:14px;white-space:pre-wrap;word-break:break-word}
+.msg.user{background:#3b82f6;color:#fff;align-self:flex-end;border-bottom-right-radius:4px}
+.msg.ai{background:#1e1e2a;color:#e4e4e7;align-self:flex-start;border-bottom-left-radius:4px}
+.msg.system{background:#2a2a1a;color:#c4c472;align-self:center;text-align:center;font-size:12px;max-width:90%;padding:8px 16px;border-radius:8px;border:1px solid #3a3a2a}
+.msg .ocr-text{display:block;margin-top:6px;padding:8px;background:#1a1a10;border-radius:6px;color:#b4b444;font-size:12px;max-height:200px;overflow-y:auto;white-space:pre-wrap;font-family:monospace}
+.msg .img-preview{max-width:100%;max-height:200px;border-radius:8px;margin-bottom:6px;display:block}
+.msg .tts-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:50%;background:#2a2a3a;color:#888;cursor:pointer;font-size:13px;margin-left:8px;vertical-align:middle;transition:.15s;flex-shrink:0}
+.msg .tts-btn:hover{background:#3b82f6;color:#fff}
+.msg .tts-btn.speaking{background:#3b82f6;color:#fff;animation:pulse .8s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,.4)}50%{box-shadow:0 0 0 6px rgba(59,130,246,0)}}
+.msg .msg-footer{display:flex;align-items:center;gap:4px;margin-top:4px}
+.typing{display:flex;gap:4px;padding:4px 0}
+.typing span{width:6px;height:6px;background:#888;border-radius:50%;animation:bounce 1.2s infinite}
+.typing span:nth-child(2){animation-delay:.2s}
+.typing span:nth-child(3){animation-delay:.4s}
+@keyframes bounce{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}}
+#input-area{background:#1a1a24;border-top:1px solid #2a2a3a;padding:14px 20px;display:flex;gap:10px;align-items:flex-end;flex-shrink:0}
+#input-area textarea{flex:1;background:#0f0f13;border:1px solid #2a2a3a;border-radius:10px;padding:10px 14px;color:#e4e4e7;font-size:14px;resize:none;outline:none;font-family:inherit;min-height:42px;max-height:120px;line-height:1.4}
+#input-area textarea:focus{border-color:#3b82f6}
+#input-area button{width:42px;height:42px;border-radius:10px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex-shrink:0}
+#btn-send{background:#3b82f6;color:#fff}
+#btn-send:hover{background:#2563eb}
+#btn-send:disabled{background:#333;cursor:not-allowed}
+#btn-img{background:#2a2a3a;color:#888;font-size:18px}
+#btn-img:hover{background:#3a3a4a}
+#file-input{display:none}
+#drop-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(59,130,246,.15);border:3px dashed #3b82f6;z-index:999;display:none;align-items:center;justify-content:center;pointer-events:none}
+#drop-overlay.show{display:flex}
+#drop-overlay span{background:#1a1a24;color:#3b82f6;padding:16px 32px;border-radius:12px;font-size:18px;font-weight:600;border:1px solid #3b82f6}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Big Pickle</h1>
+  <span>OpenCode Zen</span>
+</header>
+
+<div id="chat">
+  <div class="msg ai">Olá! Envie uma mensagem ou uma imagem (foto de correção, anotações, etc). Eu extraio o texto da imagem com OCR e ajudo com o que precisar.</div>
+</div>
+
+<div id="input-area">
+  <button id="btn-img" title="Enviar imagem">  </button>
+  <input type="file" id="file-input" accept="image/*">
+  <textarea id="msg-input" placeholder="Digite sua mensagem..." rows="1"></textarea>
+  <button id="btn-send" title="Enviar">  </button>
+</div>
+
+<div id="drop-overlay"><span>  Solte a imagem aqui</span></div>
+
+<script>
+const chat=document.getElementById('chat');
+const input=document.getElementById('msg-input');
+const sendBtn=document.getElementById('btn-send');
+const imgBtn=document.getElementById('btn-img');
+const fileInput=document.getElementById('file-input');
+
+let messages=[];
+let loading=false;
+let dragCounter=0;
+
+const dropOverlay=document.getElementById('drop-overlay');
+
+document.addEventListener('dragenter',e=>{
+  e.preventDefault();dragCounter++;
+  if(e.dataTransfer.items&&e.dataTransfer.items.length>0)
+    dropOverlay.classList.add('show');
+});
+
+document.addEventListener('dragover',e=>e.preventDefault());
+
+document.addEventListener('dragleave',e=>{
+  e.preventDefault();dragCounter--;
+  if(dragCounter<=0){dragCounter=0;dropOverlay.classList.remove('show')}
+});
+
+document.addEventListener('drop',e=>{
+  e.preventDefault();dragCounter=0;dropOverlay.classList.remove('show');
+  const files=e.dataTransfer.files;
+  if(files.length&&files[0].type.startsWith('image/'))uploadImage(files[0]);
+});
+
+function addMsg(role,html){
+  const div=document.createElement('div');
+  div.className='msg '+role;
+  div.innerHTML=html;
+  chat.appendChild(div);
+  chat.scrollTop=chat.scrollHeight;
+  return div;
+}
+
+function addTyping(){
+  const div=document.createElement('div');
+  div.className='msg ai';
+  div.innerHTML='<div class="typing"><span></span><span></span><span></span></div>';
+  chat.appendChild(div);
+  chat.scrollTop=chat.scrollHeight;
+  return div;
+}
+
+function escapeHtml(s){
+  const d=document.createElement('div');
+  d.textContent=s;
+  return d.innerHTML;
+}
+
+input.addEventListener('input',()=>{
+  input.style.height='auto';
+  input.style.height=Math.min(input.scrollHeight,120)+'px';
+});
+
+input.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMsg()}
+});
+
+sendBtn.addEventListener('click',sendMsg);
+
+imgBtn.addEventListener('click',()=>fileInput.click());
+
+fileInput.addEventListener('change',async()=>{
+  const file=fileInput.files[0];
+  if(!file)return;
+  fileInput.value='';
+  await uploadImage(file);
+});
+
+async function uploadImage(file){
+  if(loading)return;
+  loading=true;sendBtn.disabled=true;
+
+  const reader=new FileReader();
+  const dataUrl=await new Promise(r=>{reader.onload=e=>r(e.target.result);reader.readAsDataURL(file)});
+
+  addMsg('user',`<img class="img-preview" src="${dataUrl}" alt="imagem"><div>📷 Imagem enviada — extraindo texto...</div>`);
+
+  const typing=addTyping();
+
+  const form=new FormData();
+  form.append('image',file);
+
+  try{
+    const res=await fetch('/api/upload',{method:'POST',body:form});
+    const data=await res.json();
+    typing.remove();
+
+    if(!res.ok||data.error){
+      addMsg('system',`Erro OCR: ${data.error||'falha'}`);
+      loading=false;sendBtn.disabled=false;
+      return;
+    }
+
+    const ocrText=data.text||'(nenhum texto encontrado)';
+
+    addMsg('system',`📝 Texto extraído via OCR:<span class="ocr-text">${escapeHtml(ocrText)}</span>`);
+
+    messages.push({role:'user',content:`[Imagem enviada — texto extraído por OCR]:\n${ocrText}`});
+
+    await streamChat();
+
+  }catch(e){
+    typing.remove();
+    addMsg('system','Erro ao processar imagem');
+  }
+  loading=false;sendBtn.disabled=false;
+}
+
+async function sendMsg(){
+  const text=input.value.trim();
+  if(!text||loading)return;
+  input.value='';input.style.height='auto';
+
+  messages.push({role:'user',content:text});
+  addMsg('user',escapeHtml(text));
+
+  await streamChat();
+}
+
+function speak(btn){
+  const msgDiv=btn.closest('.msg');
+  const body=msgDiv.querySelector('.msg-body');
+  if(!body||!body.textContent.trim())return;
+  if(window._synth&&window._synth.speaking){
+    window._synth.cancel();
+    document.querySelectorAll('.tts-btn.speaking').forEach(b=>b.classList.remove('speaking'));
+    return;
+  }
+  window._synth=new SpeechSynthesisUtterance(body.textContent);
+  window._synth.lang='pt-BR';
+  window._synth.rate=1;
+  btn.classList.add('speaking');
+  window._synth.onend=()=>btn.classList.remove('speaking');
+  window._synth.onerror=()=>btn.classList.remove('speaking');
+  speechSynthesis.speak(window._synth);
+}
+
+async function streamChat(){
+  const typing=addTyping();
+
+  try{
+    const res=await fetch('/api/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages})
+    });
+
+    typing.remove();
+
+    if(!res.ok){
+      addMsg('system',`Erro ${res.status} ao contactar API`);
+      return;
+    }
+
+    const aiDiv=addMsg('ai','<div class="msg-body"></div><div class="msg-footer"><button class="tts-btn" title="Ouvir" onclick="speak(this)">  </button></div>');
+    const bodyEl=aiDiv.querySelector('.msg-body');
+    const reader=res.body.getReader();
+    const dec=new TextDecoder();
+    let buf='';
+    let full='';
+
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+
+      const lines=buf.split('\n');
+      buf=lines.pop()||'';
+
+      for(const line of lines){
+        if(!line.startsWith('data: '))continue;
+        const payload=line.slice(6).trim();
+        if(payload==='[DONE]'){break;}
+        try{
+          const txt=JSON.parse(payload);
+          if(typeof txt==='string'){
+            full+=txt;
+            bodyEl.textContent=full;
+            chat.scrollTop=chat.scrollHeight;
+          }
+        }catch(e){}
+      }
+    }
+
+    messages.push({role:'assistant',content:full});
+
+  }catch(e){
+    typing.remove();
+    addMsg('system','Erro de conexão');
+  }
+}
+</script>
+</body>
+</html>
