@@ -113,5 +113,4 @@ curl -N http://localhost:8080/api/chat \
 
 ## Projetos relacionados
 
-- [text-resumer](https://github.com/HeroRickyGAMES/text-resumer) — API Go que resume textos pelo mesmo Zen anônimo, com fallback de proxy
 - [opencode-changer](https://github.com/HeroRickyGAMES/opencode-changer) — ipswap: troca de IP automática para o CLI do opencode
