@@ -5,16 +5,15 @@ import subprocess
 import sys
 import os
 
-TESSERACT = "/tmp/tesseract-extract/usr/bin/tesseract"
-TESSDATA  = "/tmp/tesseract-extract/usr/share/tesseract-ocr/5/tessdata"
-LIB_PATH  = "/tmp/tesseract-extract/usr/lib/x86_64-linux-gnu"
+TESSERACT = "/usr/bin/tesseract"
+TESSDATA  = "/usr/share/tesseract-ocr/5/tessdata"
 
 
 def ocr(image_path: str) -> str:
     if not os.path.exists(image_path):
         return ""
 
-    env = {**os.environ, "TESSDATA_PREFIX": TESSDATA, "LD_LIBRARY_PATH": LIB_PATH}
+    env = {**os.environ, "TESSDATA_PREFIX": TESSDATA}
     cmd = [TESSERACT, image_path, "stdout", "-l", "por+eng", "--psm", "3"]
 
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
