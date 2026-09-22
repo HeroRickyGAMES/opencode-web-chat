@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,17 +15,6 @@ import (
 	"time"
 )
 
-const (
-	aiBaseURL = "https://opencode.ai/zen/v1"
-	aiModel   = "big-pickle"
-
-	// User-Agent do cliente oficial. O zen só aceita o modo anônimo com ele:
-	// sem/abaixo da versão mínima do free tier, responde 403 FreeTierError/429.
-	defaultUA = "opencode/1.18.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.0"
-)
-
-var apiKey = os.Getenv("OPENCODE_API_KEY")
-
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -36,12 +22,6 @@ type Message struct {
 
 type chatRequest struct {
 	Messages []Message `json:"messages"`
-}
-
-type openAIRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
 }
 
 func main() {
@@ -102,35 +82,32 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	aiReq := openAIRequest{
-		Model:    aiModel,
-		Messages: req.Messages,
-		Stream:   true,
-	}
-
-	// Tenta direto (streaming). Se o zen recusar (403/429/5xx ou falha de
-	// transporte), parte para o `opencode run` — o CLI oficial já faz a
-	// rotação de proxy por conta própria (mesmo esquema do text-resumer).
-	if streamDirect(r.Context(), w, flusher, aiReq) {
-		log.Printf("zen direto recusou — tentando opencode run")
-
-		ctx, cancel := context.WithTimeout(r.Context(), chatTimeout())
-		defer cancel()
-
-		out, err := chatViaOpenCode(ctx, opencodeBin(), aiReq.Messages)
-		if err != nil || strings.TrimSpace(out) == "" {
-			if err == nil {
-				err = fmt.Errorf("resposta vazia")
-			}
-			fmt.Fprintf(w, "data: {\"error\":\"%v\"}\n\n", err)
-			flusher.Flush()
-			return
-		}
-
-		emitChunked(w, flusher, out)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
+	// Tudo passa pelo `opencode run`: o CLI oficial já lida com a rotação de
+	// egress/proxy por conta própria (mesmo esquema do text-resumer), então o
+	// zen direto (que vive em 403/429) foi eliminado.
+	bin := opencodeBin()
+	if bin == "" {
+		fmt.Fprintf(w, "data: {\"error\":\"opencode CLI nao encontrado (OPENCODE_BIN ou PATH)\"}\n\n")
 		flusher.Flush()
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), chatTimeout())
+	defer cancel()
+
+	out, err := chatViaOpenCode(ctx, bin, req.Messages)
+	if err != nil || strings.TrimSpace(out) == "" {
+		if err == nil {
+			err = fmt.Errorf("resposta vazia")
+		}
+		fmt.Fprintf(w, "data: {\"error\":\"%v\"}\n\n", err)
+		flusher.Flush()
+		return
+	}
+
+	emitChunked(w, flusher, out)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 // chatTimeout limita o tempo do fallback via `opencode run`. O CLI rotaciona
@@ -166,108 +143,6 @@ func splitRunes(s string, n int) []string {
 		rs = rs[n:]
 	}
 	return parts
-}
-
-// streamDirect transmite a resposta do zen (SSE) para o cliente. Devolve true
-// quando o zen recusou (status != 200 ou falha de transporte) — nada é
-// escrito e o chamador deve partir para o fallback. Em sucesso (200), flui os
-// chunks e o [DONE], devolvendo false.
-func streamDirect(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, aiReq openAIRequest) bool {
-	payload, _ := json.Marshal(aiReq)
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, aiBaseURL+"/chat/completions", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("montar request do zen falhou: %v", err)
-		return true
-	}
-	setZenHeaders(httpReq)
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		log.Printf("zen inacessível (direto): %v", err)
-		return true
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		log.Printf("zen direto recusou com status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		return true
-	}
-
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			break
-		}
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := strings.TrimPrefix(line, "data: ")
-		if payload == "[DONE]" {
-			break
-		}
-
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content *string `json:"content"`
-				} `json:"delta"`
-				FinishReason *string `json:"finish_reason"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		if chunk.Choices[0].Delta.Content != nil {
-			content := *chunk.Choices[0].Delta.Content
-			if content != "" {
-				fmt.Fprintf(w, "data: %s\n\n", jsonEsc(content))
-				flusher.Flush()
-			}
-		}
-		if chunk.Choices[0].FinishReason != nil {
-			break
-		}
-	}
-
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
-	return false
-}
-
-func effectiveAPIKey() string {
-	if apiKey != "" {
-		return apiKey
-	}
-	return "public"
-}
-
-// setZenHeaders monta os headers que o zen aceita no modo anônimo: sem o
-// user-agent/runtime do cliente oficial, a chave "public" responde 403/429.
-func setZenHeaders(req *http.Request) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+effectiveAPIKey())
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("User-Agent", defaultUA)
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-project", "6d629fd1e3510e726353f8027e55b7609bbb788b")
-	req.Header.Set("x-opencode-request", newID("msg_"))
-	req.Header.Set("x-opencode-session", newID("ses_"))
-}
-
-func newID(prefix string) string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return prefix + fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return prefix + hex.EncodeToString(b)
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
